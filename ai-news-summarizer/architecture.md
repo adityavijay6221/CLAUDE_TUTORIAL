@@ -1,0 +1,85 @@
+# AI News Summarizer — Architecture
+
+## Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        FRONTEND (React)                         │
+│                                                                 │
+│  ┌──────────────────┐      ┌───────────────────────────────┐   │
+│  │   Search Bar     │      │     News Summary Panel         │   │
+│  │  (Topic Input)   │      │  - Summary text                │   │
+│  └────────┬─────────┘      │  - Source articles listed      │   │
+│           │                │  - Follow-up Q&A chat box      │   │
+│           │                └───────────────────────────────┘   │
+└───────────┼────────────────────────────────────────────────────┘
+            │ HTTP REST (Axios)
+            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      BACKEND (FastAPI)                          │
+│                                                                 │
+│  POST /api/summarize   { topic: string }                        │
+│  POST /api/followup    { question: string, session_id: string } │
+│  GET  /api/health                                               │
+│                                                                 │
+│           │                                                     │
+│           ▼                                                     │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │               LangGraph Agent (StateGraph)              │   │
+│  │                                                         │   │
+│  │   ┌──────────┐    ┌───────────────┐    ┌────────────┐  │   │
+│  │   │  START   │───▶│  fetch_news   │───▶│ summarize  │  │   │
+│  │   └──────────┘    │  (Tavily Tool)│    │  (GPT-4o)  │  │   │
+│  │                   └───────────────┘    └─────┬──────┘  │   │
+│  │                                              │          │   │
+│  │                                              ▼          │   │
+│  │                                         ┌─────────┐    │   │
+│  │                   ┌─────────────────────│   END   │    │   │
+│  │                   │  (Q&A loop)         └─────────┘    │   │
+│  │                   │                                     │   │
+│  │   ┌───────────────▼──────────────────────────────────┐ │   │
+│  │   │         Q&A Node (Conversation Memory)            │ │   │
+│  │   │   - Context: fetched articles + summary           │ │   │
+│  │   │   - Chat history (list of messages)               │ │   │
+│  │   │   - GPT-4o answers follow-up questions            │ │   │
+│  │   └──────────────────────────────────────────────────┘ │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  ┌──────────────────┐    ┌──────────────────────────────────┐  │
+│  │  Tavily Search   │    │  Session Store (in-memory dict)  │  │
+│  │  API (Tool)      │    │  Maps session_id → agent state   │  │
+│  └──────────────────┘    └──────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+                    │
+                    ▼
+         ┌──────────────────┐
+         │  OpenAI GPT-4o   │
+         │  (via LangChain) │
+         └──────────────────┘
+         ┌──────────────────┐
+         │  Tavily Search   │
+         │  API (web news)  │
+         └──────────────────┘
+```
+
+## Data Flow
+
+1. User enters a topic in the SearchBar
+2. Frontend POSTs to `/api/summarize`
+3. FastAPI invokes LangGraph's `summarize_graph`
+   - `fetch_news` node: Tavily searches the web for the topic
+   - `summarize` node: GPT-4o generates a structured summary
+4. Response returns `{ summary, articles, session_id }`
+5. Summary and sources are displayed in `NewsSummary`
+6. User asks follow-up in `ChatBox`
+7. Frontend POSTs to `/api/followup` with `session_id`
+8. FastAPI loads session state, runs `qa_graph`
+   - `qa` node: GPT-4o answers using articles + summary + chat_history as context
+9. Answer appears in the chat; chat_history is persisted in session
+
+## Session Management
+
+Sessions are stored in-memory (Python dict) keyed by UUID. Each session holds the full `AgentState`:
+- `topic`, `articles`, `summary` — from the summarize run
+- `chat_history` — grows with each Q&A exchange
+- `question`, `answer` — ephemeral per Q&A request
